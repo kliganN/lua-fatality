@@ -6,6 +6,7 @@ local SCRIPT_ID = 'skeet_hud_core'
 local ui = {}
 local state = {
     logs = {},
+    hit_logs = {},
     fps = 0,
     last_frame = draw.GetTime(),
 }
@@ -84,6 +85,62 @@ local function add_log(text, col)
 
     while #state.logs > limit do
         table.remove(state.logs)
+    end
+end
+
+local hitgroups = {
+    [0] = 'generic',
+    [1] = 'head',
+    [2] = 'chest',
+    [3] = 'stomach',
+    [4] = 'left arm',
+    [5] = 'right arm',
+    [6] = 'left leg',
+    [7] = 'right leg',
+    [8] = 'neck',
+}
+
+local function player_name(controller)
+    return safe(function()
+        local name = controller:GetName()
+        if name and name ~= '' then return name end
+        return 'unknown'
+    end, 'unknown')
+end
+
+local function is_local_controller(controller)
+    local local_controller = safe(function() return entities.GetLocalController() end, nil)
+    if not controller or not local_controller then return false end
+    if controller == local_controller then return true end
+    return player_name(controller) == player_name(local_controller)
+end
+
+local function add_hit_log(event, c)
+    if not get_bool(ui.hitlogs, true) then return end
+
+    local attacker = safe(function() return event:GetController('attacker') end, nil)
+    if not is_local_controller(attacker) then return end
+
+    local victim = safe(function() return event:GetController('userid') end, nil)
+    local victim_name = player_name(victim)
+    local damage = safe(function() return event:GetInt('dmg_health') end, 0)
+    local remaining = safe(function() return event:GetInt('health') end, 0)
+    local hitgroup = safe(function() return event:GetInt('hitgroup') end, 0)
+    local group = hitgroups[hitgroup] or 'body'
+    local limit = get_num(ui.hitlog_limit, 6)
+
+    table.insert(state.hit_logs, 1, {
+        victim = victim_name,
+        group = group,
+        damage = damage,
+        remaining = remaining,
+        born = draw.GetTime(),
+        life = 5.0,
+        col = damage >= 90 and c.warn or c.accent,
+    })
+
+    while #state.hit_logs > limit do
+        table.remove(state.hit_logs)
     end
 end
 
@@ -260,13 +317,56 @@ local function logs(layer, c)
     end
 end
 
-local function on_event(event)
-    if not get_bool(ui.logs, true) then return end
+local function hit_logs(layer, c)
+    if not get_bool(ui.hitlogs, true) then return end
 
+    local now = draw.GetTime()
+    local x = get_num(ui.hitlog_x, 18)
+    local y = get_num(ui.hitlog_y, 330)
+    local max_w = 0
+
+    for i = #state.hit_logs, 1, -1 do
+        local log = state.hit_logs[i]
+        if now - log.born > log.life then
+            table.remove(state.hit_logs, i)
+        else
+            local line = string.format('hit %s in %s', log.victim, log.group)
+            max_w = math.max(max_w, text_w(line) + 118)
+        end
+    end
+
+    if #state.hit_logs == 0 then return end
+
+    local width = math.max(max_w, 260)
+    panel(layer, x, y, width, 24 + #state.hit_logs * 20, c)
+    layer:AddText(draw.Vec2(x + 7, y + 5), 'hit logs', c.text)
+
+    for i, log in ipairs(state.hit_logs) do
+        local age = now - log.born
+        local alpha = clamp(math.min(age / 0.16, (log.life - age) / 0.55), 0, 1)
+        local yy = y + 23 + (i - 1) * 20
+        local damage = tostring(log.damage) .. ' dmg'
+        local remaining = tostring(math.max(log.remaining, 0)) .. ' hp'
+        local left = string.format('hit %s in %s', log.victim, log.group)
+        local right_w = text_w(damage) + text_w(remaining) + 22
+
+        layer:AddRectFilled(draw.Rect(x + 1, yy, x + width - 1, yy + 20), c.panel:ModA(alpha))
+        layer:AddRectFilled(draw.Rect(x + 1, yy, x + 4, yy + 20), log.col:ModA(alpha))
+        layer:AddText(draw.Vec2(x + 8, yy + 4), left, c.text:ModA(alpha))
+        layer:AddText(draw.Vec2(x + width - right_w, yy + 4), damage, log.col:ModA(alpha))
+        layer:AddText(draw.Vec2(x + width - text_w(remaining) - 12, yy + 4), remaining, c.muted:ModA(alpha))
+    end
+end
+
+local function on_event(event)
     local name = event:GetName()
     local c = colors()
 
-    if name == 'round_start' then
+    if name == 'player_hurt' then
+        add_hit_log(event, c)
+    elseif not get_bool(ui.logs, true) then
+        return
+    elseif name == 'round_start' then
         add_log('round started', c.success)
     elseif name == 'bomb_beginplant' then
         add_log('bomb plant started', c.warn)
@@ -294,6 +394,7 @@ local function on_present()
     watermark(layer, c)
     keybinds(layer, c)
     indicators(layer, c)
+    hit_logs(layer, c)
     logs(layer, c)
 end
 
@@ -307,8 +408,8 @@ local function add_controls()
         parent = gui.ctx:Find('lua>groups')
     end
 
-    local main = gui.Group(SCRIPT_ID .. '_main', 'Main', 220, gui.GroupWidthMode.FULL)
-    local layout = gui.Group(SCRIPT_ID .. '_layout', 'Layout', 260, gui.GroupWidthMode.FULL)
+    local main = gui.Group(SCRIPT_ID .. '_main', 'Main', 270, gui.GroupWidthMode.FULL)
+    local layout = gui.Group(SCRIPT_ID .. '_layout', 'Layout', 340, gui.GroupWidthMode.FULL)
 
     parent:Add(main)
     parent:Add(layout)
@@ -316,22 +417,28 @@ local function add_controls()
     ui.watermark, ui.watermark_row = gui.MakeControlEasy(SCRIPT_ID .. '_watermark', 'Watermark', 'checkbox')
     ui.keybinds, ui.keybinds_row = gui.MakeControlEasy(SCRIPT_ID .. '_keybinds', 'Keybind list', 'checkbox')
     ui.indicators, ui.indicators_row = gui.MakeControlEasy(SCRIPT_ID .. '_indicators', 'Indicators', 'checkbox')
+    ui.hitlogs, ui.hitlogs_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlogs', 'Hit logs', 'checkbox')
     ui.logs, ui.logs_row = gui.MakeControlEasy(SCRIPT_ID .. '_logs', 'Event log', 'checkbox')
     ui.accent, ui.accent_row = gui.MakeControlEasy(SCRIPT_ID .. '_accent', 'Accent', 'color_picker', true)
+    ui.hitlog_limit, ui.hitlog_limit_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_limit', 'Hit log limit', 'slider', 2, 10)
     ui.log_limit, ui.log_limit_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_limit', 'Log limit', 'slider', 2, 10)
 
     ui.watermark:SetValue(true)
     ui.keybinds:SetValue(true)
     ui.indicators:SetValue(true)
+    ui.hitlogs:SetValue(true)
     ui.logs:SetValue(true)
     set_value(ui.accent, color(145, 210, 80))
+    set_value(ui.hitlog_limit, 6)
     set_value(ui.log_limit, 6)
 
     main:Add(ui.watermark_row)
     main:Add(ui.keybinds_row)
     main:Add(ui.indicators_row)
+    main:Add(ui.hitlogs_row)
     main:Add(ui.logs_row)
     main:Add(ui.accent_row)
+    main:Add(ui.hitlog_limit_row)
     main:Add(ui.log_limit_row)
     main:Reset()
 
@@ -341,6 +448,8 @@ local function add_controls()
     ui.bind_w, ui.bind_w_row = gui.MakeControlEasy(SCRIPT_ID .. '_bind_w', 'Binds width', 'slider', 130, 280)
     ui.ind_x, ui.ind_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_ind_x', 'Indicators X', 'slider', -300, 300)
     ui.ind_y, ui.ind_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_ind_y', 'Indicators Y', 'slider', -200, 300)
+    ui.hitlog_x, ui.hitlog_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_x', 'Hit logs X', 'slider', 0, 900)
+    ui.hitlog_y, ui.hitlog_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_y', 'Hit logs Y', 'slider', 0, 900)
     ui.log_x, ui.log_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_x', 'Log X', 'slider', 0, 900)
     ui.log_y, ui.log_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_y', 'Log Y', 'slider', 0, 900)
 
@@ -350,6 +459,8 @@ local function add_controls()
     set_value(ui.bind_w, 178)
     set_value(ui.ind_x, -42)
     set_value(ui.ind_y, 38)
+    set_value(ui.hitlog_x, 18)
+    set_value(ui.hitlog_y, 330)
     set_value(ui.log_x, 18)
     set_value(ui.log_y, 430)
 
@@ -359,12 +470,16 @@ local function add_controls()
     layout:Add(ui.bind_w_row)
     layout:Add(ui.ind_x_row)
     layout:Add(ui.ind_y_row)
+    layout:Add(ui.hitlog_x_row)
+    layout:Add(ui.hitlog_y_row)
     layout:Add(ui.log_x_row)
     layout:Add(ui.log_y_row)
     layout:Reset()
 end
 
 add_controls()
+
+pcall(function() mods.events:AddListener('player_hurt') end)
 
 events.presentQueue:Add(on_present)
 events.event:Add(on_event)
