@@ -9,6 +9,7 @@ local state = {
     hit_logs = {},
     fps = 0,
     last_frame = draw.GetTime(),
+    drag = nil,
 }
 
 local function clamp(v, lo, hi)
@@ -46,6 +47,10 @@ local function set_value(control, value)
     if control then
         pcall(function() control:GetValue():Set(value) end)
     end
+end
+
+local function point_in_rect(p, x, y, w, h)
+    return p and p.x >= x and p.x <= x + w and p.y >= y and p.y <= y + h
 end
 
 local function text_w(text)
@@ -129,6 +134,13 @@ local function add_hit_log(event, c)
     local group = hitgroups[hitgroup] or 'body'
     local limit = get_num(ui.hitlog_limit, 6)
 
+    local hit_col = c.accent
+    if remaining <= 0 then
+        hit_col = c.success
+    elseif hitgroup == 1 or damage >= 90 then
+        hit_col = c.warn
+    end
+
     table.insert(state.hit_logs, 1, {
         victim = victim_name,
         group = group,
@@ -136,7 +148,7 @@ local function add_hit_log(event, c)
         remaining = remaining,
         born = draw.GetTime(),
         life = 5.0,
-        col = damage >= 90 and c.warn or c.accent,
+        col = hit_col,
     })
 
     while #state.hit_logs > limit do
@@ -153,6 +165,51 @@ local function panel(layer, x, y, w, h, c)
     layer:AddLine(draw.Vec2(x + 1, y + 1), draw.Vec2(x + w - 1, y + 1), cs.accent, 1.0)
 end
 
+local screen_size
+
+local function drag_panel(id, x, y, w, h, x_control, y_control)
+    if not gui.IsVisible() or not get_bool(ui.drag_panels, true) then
+        if state.drag and state.drag.id == id then state.drag = nil end
+        return x, y
+    end
+
+    local cur = safe(function() return gui.input:Cursor() end, nil)
+    local down = safe(function() return gui.input:IsMouseDown(gui.MouseButton.LEFT) end, false)
+    local clicked = safe(function() return gui.input:IsMouseClicked(gui.MouseButton.LEFT) end, false)
+    local released = safe(function() return gui.input:IsMouseReleased(gui.MouseButton.LEFT) end, false)
+
+    if released or not down then
+        if state.drag and state.drag.id == id then state.drag = nil end
+    end
+
+    local header_h = math.min(24, h)
+    if clicked and not state.drag and point_in_rect(cur, x, y, w, header_h) then
+        state.drag = {
+            id = id,
+            dx = cur.x - x,
+            dy = cur.y - y,
+        }
+    end
+
+    if state.drag and state.drag.id == id and down and cur then
+        local sw, sh = screen_size()
+        local nx = clamp(cur.x - state.drag.dx, 0, math.max(0, sw - w))
+        local ny = clamp(cur.y - state.drag.dy, 0, math.max(0, sh - h))
+        set_value(x_control, math.floor(nx + 0.5))
+        set_value(y_control, math.floor(ny + 0.5))
+        return nx, ny
+    end
+
+    return x, y
+end
+
+local function drag_hint(layer, x, y, w, h, c)
+    if gui.IsVisible() and get_bool(ui.drag_panels, true) then
+        layer:AddRect(draw.Rect(x, y, x + w, y + h), c.accent:ModA(0.42), 1.0)
+        layer:AddText(draw.Vec2(x + w - 37, y + 5), 'drag', c.muted:ModA(0.75))
+    end
+end
+
 local function draw_row(layer, x, y, w, left, right, alpha, c)
     local cs = c or colors()
     local a = alpha or 1
@@ -163,7 +220,7 @@ local function draw_row(layer, x, y, w, left, right, alpha, c)
     end
 end
 
-local function screen_size()
+function screen_size()
     local display = safe(function() return draw.GetDisplay() end, nil)
     if display then return display.x, display.y end
 
@@ -201,11 +258,16 @@ local function watermark(layer, c)
     local text = string.format('fatality.lua | skeet hud | %d fps | %d ms',
         math.floor(state.fps + 0.5), ping)
     local width = text_w(text) + 18
-    local x = w - width - get_num(ui.margin, 12)
-    local y = get_num(ui.margin, 12)
+    local default_x = w - width - get_num(ui.margin, 12)
+    local x = get_num(ui.watermark_x, default_x)
+    local y = get_num(ui.watermark_y, get_num(ui.margin, 12))
+
+    if x <= 0 then x = default_x end
+    x, y = drag_panel('watermark', x, y, width, 22, ui.watermark_x, ui.watermark_y)
 
     panel(layer, x, y, width, 22, c)
     layer:AddText(draw.Vec2(x + 8, y + 5), text, c.text)
+    drag_hint(layer, x, y, width, 22, c)
 end
 
 local function active_binds()
@@ -240,25 +302,30 @@ local function keybinds(layer, c)
     if not get_bool(ui.keybinds, true) then return end
 
     local binds = active_binds()
-    if #binds == 0 and not gui.IsVisible() then return end
+    local preview = gui.IsVisible() and get_bool(ui.preview, true)
+    if #binds == 0 and not preview then return end
 
     local x = get_num(ui.bind_x, 18)
     local y = get_num(ui.bind_y, 180)
     local width = get_num(ui.bind_w, 178)
-    local rows = math.max(#binds, gui.IsVisible() and 1 or 0)
+    local rows = math.max(#binds, preview and 2 or 0)
     local height = 22 + rows * 18 + 4
+    x, y = drag_panel('keybinds', x, y, width, height, ui.bind_x, ui.bind_y)
 
     panel(layer, x, y, width, height, c)
     layer:AddText(draw.Vec2(x + 7, y + 5), 'keybinds', c.text)
 
     if #binds == 0 then
         draw_row(layer, x + 1, y + 23, width - 2, 'menu preview', 'hold', 0.72, c)
+        draw_row(layer, x + 1, y + 41, width - 2, 'damage override', 'toggle', 0.58, c)
+        drag_hint(layer, x, y, width, height, c)
         return
     end
 
     for i, bind in ipairs(binds) do
         draw_row(layer, x + 1, y + 23 + (i - 1) * 18, width - 2, bind.label, bind.value, 1, c)
     end
+    drag_hint(layer, x, y, width, height, c)
 end
 
 local function indicators(layer, c)
@@ -291,6 +358,8 @@ local function logs(layer, c)
     local x = get_num(ui.log_x, 18)
     local y = get_num(ui.log_y, 430)
     local max_w = 0
+    local preview = gui.IsVisible() and get_bool(ui.preview, true)
+    local rows = state.logs
 
     for i = #state.logs, 1, -1 do
         local log = state.logs[i]
@@ -301,20 +370,32 @@ local function logs(layer, c)
         end
     end
 
-    if #state.logs == 0 then return end
+    if #state.logs == 0 and preview then
+        rows = {
+            { text = 'round started', col = c.success, born = now, life = 1 },
+            { text = 'bomb planted', col = c.warn, born = now, life = 1 },
+            { text = 'skeet hud preview', col = c.accent, born = now, life = 1 },
+        }
+        max_w = 210
+    elseif #state.logs == 0 then
+        return
+    end
 
     local width = math.max(max_w, 210)
-    panel(layer, x, y, width, 24 + #state.logs * 18, c)
+    local height = 24 + #rows * 18
+    x, y = drag_panel('logs', x, y, width, height, ui.log_x, ui.log_y)
+    panel(layer, x, y, width, height, c)
     layer:AddText(draw.Vec2(x + 7, y + 5), 'event log', c.text)
 
-    for i, log in ipairs(state.logs) do
+    for i, log in ipairs(rows) do
         local age = now - log.born
-        local alpha = clamp(math.min(age / 0.18, (log.life - age) / 0.45), 0, 1)
+        local alpha = preview and 0.88 or clamp(math.min(age / 0.18, (log.life - age) / 0.45), 0, 1)
         local yy = y + 23 + (i - 1) * 18
         layer:AddRectFilled(draw.Rect(x + 1, yy, x + width - 1, yy + 18), c.panel:ModA(alpha))
         layer:AddText(draw.Vec2(x + 7, yy + 3), '[lua]', log.col:ModA(alpha))
         layer:AddText(draw.Vec2(x + 43, yy + 3), log.text, c.text:ModA(alpha))
     end
+    drag_hint(layer, x, y, width, height, c)
 end
 
 local function hit_logs(layer, c)
@@ -324,6 +405,8 @@ local function hit_logs(layer, c)
     local x = get_num(ui.hitlog_x, 18)
     local y = get_num(ui.hitlog_y, 330)
     local max_w = 0
+    local preview = gui.IsVisible() and get_bool(ui.preview, true)
+    local rows = state.hit_logs
 
     for i = #state.hit_logs, 1, -1 do
         local log = state.hit_logs[i]
@@ -335,27 +418,42 @@ local function hit_logs(layer, c)
         end
     end
 
-    if #state.hit_logs == 0 then return end
+    if #state.hit_logs == 0 and preview then
+        rows = {
+            { victim = 'enemy_01', group = 'head', damage = 92, remaining = 0, born = now - 0.12, life = 1, col = c.success },
+            { victim = 'mirage enjoyer', group = 'stomach', damage = 48, remaining = 52, born = now - 0.28, life = 1, col = c.accent },
+            { victim = 'player', group = 'chest', damage = 27, remaining = 73, born = now - 0.44, life = 1, col = c.accent },
+        }
+        max_w = 330
+    elseif #state.hit_logs == 0 then
+        return
+    end
 
     local width = math.max(max_w, 260)
-    panel(layer, x, y, width, 24 + #state.hit_logs * 20, c)
+    local height = 24 + #rows * 20
+    x, y = drag_panel('hitlogs', x, y, width, height, ui.hitlog_x, ui.hitlog_y)
+    panel(layer, x, y, width, height, c)
     layer:AddText(draw.Vec2(x + 7, y + 5), 'hit logs', c.text)
 
-    for i, log in ipairs(state.hit_logs) do
+    for i, log in ipairs(rows) do
         local age = now - log.born
-        local alpha = clamp(math.min(age / 0.16, (log.life - age) / 0.55), 0, 1)
+        local alpha = preview and 0.92 or clamp(math.min(age / 0.16, (log.life - age) / 0.55), 0, 1)
+        local slide = preview and 0 or (1 - alpha) * 18
         local yy = y + 23 + (i - 1) * 20
         local damage = tostring(log.damage) .. ' dmg'
         local remaining = tostring(math.max(log.remaining, 0)) .. ' hp'
         local left = string.format('hit %s in %s', log.victim, log.group)
         local right_w = text_w(damage) + text_w(remaining) + 22
+        local rx = x - slide
 
-        layer:AddRectFilled(draw.Rect(x + 1, yy, x + width - 1, yy + 20), c.panel:ModA(alpha))
-        layer:AddRectFilled(draw.Rect(x + 1, yy, x + 4, yy + 20), log.col:ModA(alpha))
-        layer:AddText(draw.Vec2(x + 8, yy + 4), left, c.text:ModA(alpha))
-        layer:AddText(draw.Vec2(x + width - right_w, yy + 4), damage, log.col:ModA(alpha))
-        layer:AddText(draw.Vec2(x + width - text_w(remaining) - 12, yy + 4), remaining, c.muted:ModA(alpha))
+        layer:AddRectFilled(draw.Rect(rx + 1, yy, rx + width - 1, yy + 20), c.panel:ModA(alpha))
+        layer:AddRectFilled(draw.Rect(rx + 1, yy, rx + 4, yy + 20), log.col:ModA(alpha))
+        layer:AddLine(draw.Vec2(rx + 5, yy + 19), draw.Vec2(rx + 5 + (width - 10) * alpha, yy + 19), log.col:ModA(alpha * 0.65), 1.0)
+        layer:AddText(draw.Vec2(rx + 8, yy + 4), left, c.text:ModA(alpha))
+        layer:AddText(draw.Vec2(rx + width - right_w, yy + 4), damage, log.col:ModA(alpha))
+        layer:AddText(draw.Vec2(rx + width - text_w(remaining) - 12, yy + 4), remaining, c.muted:ModA(alpha))
     end
+    drag_hint(layer, x, y, width, height, c)
 end
 
 local function on_event(event)
@@ -408,8 +506,8 @@ local function add_controls()
         parent = gui.ctx:Find('lua>groups')
     end
 
-    local main = gui.Group(SCRIPT_ID .. '_main', 'Main', 270, gui.GroupWidthMode.FULL)
-    local layout = gui.Group(SCRIPT_ID .. '_layout', 'Layout', 340, gui.GroupWidthMode.FULL)
+    local main = gui.Group(SCRIPT_ID .. '_main', 'Main', 320, gui.GroupWidthMode.FULL)
+    local layout = gui.Group(SCRIPT_ID .. '_layout', 'Layout', 430, gui.GroupWidthMode.FULL)
 
     parent:Add(main)
     parent:Add(layout)
@@ -419,6 +517,8 @@ local function add_controls()
     ui.indicators, ui.indicators_row = gui.MakeControlEasy(SCRIPT_ID .. '_indicators', 'Indicators', 'checkbox')
     ui.hitlogs, ui.hitlogs_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlogs', 'Hit logs', 'checkbox')
     ui.logs, ui.logs_row = gui.MakeControlEasy(SCRIPT_ID .. '_logs', 'Event log', 'checkbox')
+    ui.drag_panels, ui.drag_panels_row = gui.MakeControlEasy(SCRIPT_ID .. '_drag_panels', 'Draggable panels', 'checkbox')
+    ui.preview, ui.preview_row = gui.MakeControlEasy(SCRIPT_ID .. '_preview', 'Menu preview', 'checkbox')
     ui.accent, ui.accent_row = gui.MakeControlEasy(SCRIPT_ID .. '_accent', 'Accent', 'color_picker', true)
     ui.hitlog_limit, ui.hitlog_limit_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_limit', 'Hit log limit', 'slider', 2, 10)
     ui.log_limit, ui.log_limit_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_limit', 'Log limit', 'slider', 2, 10)
@@ -428,6 +528,8 @@ local function add_controls()
     ui.indicators:SetValue(true)
     ui.hitlogs:SetValue(true)
     ui.logs:SetValue(true)
+    ui.drag_panels:SetValue(true)
+    ui.preview:SetValue(true)
     set_value(ui.accent, color(145, 210, 80))
     set_value(ui.hitlog_limit, 6)
     set_value(ui.log_limit, 6)
@@ -437,22 +539,29 @@ local function add_controls()
     main:Add(ui.indicators_row)
     main:Add(ui.hitlogs_row)
     main:Add(ui.logs_row)
+    main:Add(ui.drag_panels_row)
+    main:Add(ui.preview_row)
     main:Add(ui.accent_row)
     main:Add(ui.hitlog_limit_row)
     main:Add(ui.log_limit_row)
     main:Reset()
 
     ui.margin, ui.margin_row = gui.MakeControlEasy(SCRIPT_ID .. '_margin', 'Screen margin', 'slider', 4, 40)
-    ui.bind_x, ui.bind_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_bind_x', 'Binds X', 'slider', 0, 900)
+    ui.watermark_x, ui.watermark_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_watermark_x', 'Watermark X', 'slider', 0, 2200)
+    ui.watermark_y, ui.watermark_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_watermark_y', 'Watermark Y', 'slider', 0, 1200)
+    ui.bind_x, ui.bind_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_bind_x', 'Binds X', 'slider', 0, 2200)
     ui.bind_y, ui.bind_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_bind_y', 'Binds Y', 'slider', 0, 900)
     ui.bind_w, ui.bind_w_row = gui.MakeControlEasy(SCRIPT_ID .. '_bind_w', 'Binds width', 'slider', 130, 280)
     ui.ind_x, ui.ind_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_ind_x', 'Indicators X', 'slider', -300, 300)
     ui.ind_y, ui.ind_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_ind_y', 'Indicators Y', 'slider', -200, 300)
-    ui.hitlog_x, ui.hitlog_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_x', 'Hit logs X', 'slider', 0, 900)
+    ui.hitlog_x, ui.hitlog_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_x', 'Hit logs X', 'slider', 0, 2200)
     ui.hitlog_y, ui.hitlog_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_y', 'Hit logs Y', 'slider', 0, 900)
-    ui.log_x, ui.log_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_x', 'Log X', 'slider', 0, 900)
+    ui.log_x, ui.log_x_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_x', 'Log X', 'slider', 0, 2200)
     ui.log_y, ui.log_y_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_y', 'Log Y', 'slider', 0, 900)
 
+    local sw, _ = screen_size()
+    set_value(ui.watermark_x, math.max(sw - 280, 0))
+    set_value(ui.watermark_y, 12)
     set_value(ui.margin, 12)
     set_value(ui.bind_x, 18)
     set_value(ui.bind_y, 180)
@@ -465,6 +574,8 @@ local function add_controls()
     set_value(ui.log_y, 430)
 
     layout:Add(ui.margin_row)
+    layout:Add(ui.watermark_x_row)
+    layout:Add(ui.watermark_y_row)
     layout:Add(ui.bind_x_row)
     layout:Add(ui.bind_y_row)
     layout:Add(ui.bind_w_row)
