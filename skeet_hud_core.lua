@@ -13,6 +13,7 @@ local state = {
     fps = 0,
     last_frame = draw.GetTime(),
     drag = nil,
+    fonts_ready = false,
 }
 
 local function clamp(v, lo, hi)
@@ -56,8 +57,60 @@ local function point_in_rect(p, x, y, w, h)
     return p and p.x >= x and p.x <= x + w and p.y >= y and p.y <= y + h
 end
 
-local function text_w(text)
-    return #tostring(text) * 7
+local function init_fonts()
+    if state.fonts_ready then return end
+    state.fonts_ready = true
+
+    pcall(function()
+        local main = draw.FontGDI('Tahoma', 13, 0, 0, 255, 400)
+        main.fallbackFont = draw.fonts['gui_main']
+        main:Create()
+        draw.fonts[SCRIPT_ID .. '_main'] = main
+    end)
+
+    pcall(function()
+        local bold = draw.FontGDI('Tahoma', 13, 0, 0, 255, 700)
+        bold.fallbackFont = draw.fonts['gui_bold']
+        bold:Create()
+        draw.fonts[SCRIPT_ID .. '_bold'] = bold
+    end)
+end
+
+local function use_custom_font()
+    return get_bool(ui.custom_font, true)
+end
+
+local function font_main()
+    init_fonts()
+    if use_custom_font() and draw.fonts[SCRIPT_ID .. '_main'] then
+        return draw.fonts[SCRIPT_ID .. '_main']
+    end
+    return draw.fonts['gui_main']
+end
+
+local function font_bold()
+    init_fonts()
+    if use_custom_font() and draw.fonts[SCRIPT_ID .. '_bold'] then
+        return draw.fonts[SCRIPT_ID .. '_bold']
+    end
+    return draw.fonts['gui_bold']
+end
+
+local function set_font(layer, bold)
+    layer.font = bold and font_bold() or font_main()
+end
+
+local function text_size(text, font)
+    local str = tostring(text)
+    local f = font or font_main()
+    local size = safe(function() return f:GetTextSize(str, true, true) end, nil)
+    if size then return size.x, size.y end
+    return #str * 7, 14
+end
+
+local function text_w(text, font)
+    local w = text_size(text, font)
+    return w
 end
 
 local function ease_out(t)
@@ -203,6 +256,7 @@ local function draw_tag(layer, x, y, text, col, alpha)
     local w = text_w(text) + 10
     layer:AddRectFilled(draw.Rect(x, y, x + w, y + 14), col:ModA(0.18 * alpha))
     layer:AddRect(draw.Rect(x, y, x + w, y + 14), col:ModA(0.55 * alpha), 1.0)
+    set_font(layer, false)
     layer:AddText(draw.Vec2(x + 5, y + 2), text, col:ModA(alpha))
     return w
 end
@@ -302,7 +356,11 @@ local function watermark(layer, c)
     local subtitle = 'skeet hud'
     local fps = tostring(math.floor(state.fps + 0.5)) .. ' fps'
     local ms = tostring(ping) .. ' ms'
-    local width = text_w(title) + text_w(subtitle) + text_w(fps) + text_w(ms) + 78
+    local title_w = text_w(title, font_bold())
+    local subtitle_w = text_w(subtitle)
+    local fps_w = text_w(fps)
+    local ms_w = text_w(ms)
+    local width = title_w + subtitle_w + fps_w + ms_w + 78
     local height = 28
     local default_x = w - width - get_num(ui.margin, 12)
     local x = get_num(ui.watermark_x, default_x)
@@ -317,15 +375,15 @@ local function watermark(layer, c)
     layer:AddLine(draw.Vec2(x + 9, y + 14), draw.Vec2(x + 17, y + 14), c.accent, 1.0)
     layer:AddLine(draw.Vec2(x + 13, y + 10), draw.Vec2(x + 13, y + 18), c.accent, 1.0)
 
-    layer.font = draw.fonts['gui_bold']
+    set_font(layer, true)
     layer:AddText(draw.Vec2(x + 27, y + 5), title, c.text)
-    layer.font = draw.fonts['gui_main']
+    set_font(layer, false)
 
-    local sx = x + 31 + text_w(title)
+    local sx = x + 31 + title_w
     layer:AddText(draw.Vec2(sx, y + 5), subtitle, c.muted)
-    sx = sx + text_w(subtitle) + 12
+    sx = sx + subtitle_w + 12
     draw_tag(layer, sx, y + 7, fps, c.success, 0.9)
-    sx = sx + text_w(fps) + 20
+    sx = sx + fps_w + 20
     draw_tag(layer, sx, y + 7, ms, ping > 80 and c.warn or c.accent, 0.9)
 
     local scan = (now * 95) % math.max(width - 18, 1)
@@ -620,7 +678,7 @@ local function on_present()
     update_fps()
 
     local layer = draw.surface
-    layer.font = draw.fonts['gui_main']
+    set_font(layer, false)
 
     local c = colors()
     watermark(layer, c)
@@ -641,7 +699,7 @@ local function add_controls()
         parent = gui.ctx:Find('lua>groups')
     end
 
-    local main = gui.Group(SCRIPT_ID .. '_main', 'Main', 350, gui.GroupWidthMode.FULL)
+    local main = gui.Group(SCRIPT_ID .. '_main', 'Main', 380, gui.GroupWidthMode.FULL)
     local layout = gui.Group(SCRIPT_ID .. '_layout', 'Layout', 470, gui.GroupWidthMode.FULL)
 
     parent:Add(main)
@@ -655,6 +713,7 @@ local function add_controls()
     ui.logs, ui.logs_row = gui.MakeControlEasy(SCRIPT_ID .. '_logs', 'Event log', 'checkbox')
     ui.drag_panels, ui.drag_panels_row = gui.MakeControlEasy(SCRIPT_ID .. '_drag_panels', 'Draggable panels', 'checkbox')
     ui.preview, ui.preview_row = gui.MakeControlEasy(SCRIPT_ID .. '_preview', 'Menu preview', 'checkbox')
+    ui.custom_font, ui.custom_font_row = gui.MakeControlEasy(SCRIPT_ID .. '_custom_font', 'Tahoma font', 'checkbox')
     ui.accent, ui.accent_row = gui.MakeControlEasy(SCRIPT_ID .. '_accent', 'Accent', 'color_picker', true)
     ui.hitlog_limit, ui.hitlog_limit_row = gui.MakeControlEasy(SCRIPT_ID .. '_hitlog_limit', 'Hit log limit', 'slider', 2, 10)
     ui.log_limit, ui.log_limit_row = gui.MakeControlEasy(SCRIPT_ID .. '_log_limit', 'Log limit', 'slider', 2, 10)
@@ -667,6 +726,7 @@ local function add_controls()
     ui.logs:SetValue(true)
     ui.drag_panels:SetValue(true)
     ui.preview:SetValue(true)
+    ui.custom_font:SetValue(true)
     set_value(ui.accent, color(145, 210, 80))
     set_value(ui.hitlog_limit, 6)
     set_value(ui.log_limit, 6)
@@ -679,6 +739,7 @@ local function add_controls()
     main:Add(ui.logs_row)
     main:Add(ui.drag_panels_row)
     main:Add(ui.preview_row)
+    main:Add(ui.custom_font_row)
     main:Add(ui.accent_row)
     main:Add(ui.hitlog_limit_row)
     main:Add(ui.log_limit_row)
